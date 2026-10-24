@@ -1,0 +1,18 @@
+{
+  "01_python_linux": "completed",
+  "02_api_backend": "completed",
+  "03_cloud_networking": "completed",
+  "04_containers_cicd": "completed",
+  "05_llm_foundations": "completed",
+  "06_advanced_rag": "completed",
+  "07_graph_rag": "completed",
+  "08_multimodal_rag": "completed",
+  "09_langgraph_agents": "completed",
+  "10_multi_agent_systems": "completed",
+  "11_mcp_integrations": "completed",
+  "12_rbac_security": "completed",
+  "13_guardrails_safety": "completed",
+  "14_observability_evals": "completed",
+  "15_capstone_omniguard": "completed",
+  "16_capstone_auditmesh": "completed"
+}

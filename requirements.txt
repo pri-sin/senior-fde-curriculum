@@ -1,0 +1,4 @@
+pydantic>=2,<3
+# optional, only for the Module 02 FastAPI wiring:
+# fastapi
+# uvicorn
