@@ -10,31 +10,23 @@ Mental model: guardrails reduce risk, they don't eliminate it. Design as if each
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  inp["User, document, or tool output<br/>untrusted"] --> i1
+  subgraph ir["Input rails"]
+    i1["Size and encoding limits<br/>strip zero-width and bidi characters"] --> i2["PII analyzer: mask or tokenize<br/>vault holds token to value"] --> i3["Injection scorer"] --> i4["Topic rail"]
+  end
+  i3 -->|"score at or above block threshold"| ref["Refuse and log"]
+  i4 --> pa["Prompt assembly<br/>system rules plus canary token<br/>untrusted data spotlighted"] --> llm["LLM<br/>least-privilege tools"]
+  llm --> o1
+  subgraph orr["Output rails"]
+    o1["Canary and prompt-leak check"] --> o2["Secret scanner"] --> o3["PII re-scan"] --> o4["Schema, groundedness, policy"]
+  end
+  o4 -->|"fail"| fix["Redact, regenerate once,<br/>else safe refusal"]
+  o4 -->|"pass"| det["Detokenize only if caller is authorized"] --> resp["Response and masked audit log"]
 ```
- user / document / tool output
-        │ (untrusted)
-        ▼
- ┌──────────────── INPUT RAILS (sync, ~5-30 ms, fail closed on high risk) ────────────────┐
- │ 1 size/encoding limits, strip zero-width & bidi control chars                          │
- │ 2 PII analyzer (regex+Luhn+context+NER) → mask/tokenize; vault holds token→value       │
- │ 3 injection scorer (patterns, delimiter smuggling, role-play, exfil verbs)             │
- │      score ≥ block_threshold → refuse + log      score ≥ warn_threshold → tighten tools │
- │ 4 topic rail: is the request in scope for this assistant?                              │
- └───────────────────────────────┬────────────────────────────────────────────────────────┘
-                                 ▼
-          Prompt assembly: system rules (+ canary token) / <untrusted_data> spotlighted block </untrusted_data>
-                                 ▼
-                       LLM (no direct secrets, least-privilege tools; risky tool call → human approval)
-                                 ▼
- ┌──────────────── OUTPUT RAILS ──────────────────────────────────────────────────────────┐
- │ 1 canary / system-prompt leak check   2 secret scanner (keys, tokens)                  │
- │ 3 PII re-scan (model may invent or echo)   4 schema validation / groundedness check    │
- │ 5 policy/toxicity classifier        → fail: redact, regenerate once, else safe refusal │
- └───────────────────────────────┬────────────────────────────────────────────────────────┘
-                                 ▼
-         detokenize ONLY if caller is authorized for the original data ─▶ response ─▶ audit log (masked)
- Boundary: PII vault in the customer's VPC; only masked text crosses to external LLM APIs.
-```
+
+The PII vault lives in the customer's VPC, and only masked text crosses to external LLM APIs. A risky tool call goes to human approval.
 
 # Architectural Trade-Off Matrix
 

@@ -14,26 +14,26 @@ The output is a report that is *defensible*: for each requirement, a verdict, qu
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  reg["Regulation text"] --> ext["Requirement extractor<br/>plus human sign-off"] --> reqs["Versioned requirements<br/>id, severity, check type, keywords"]
+  src["Evidence sources<br/>policies, configs, tickets"] --> idx[("Evidence index<br/>snapshots by content hash")]
+  reqs --> r1
+  idx --> r1
+  subgraph orch["Orchestrator (async, checkpointed per requirement)"]
+    r1["1 Retrieve evidence"] --> r2{"2 Ground<br/>quote verbatim in source?"}
+    r2 -->|"no grounded evidence"| ins["INSUFFICIENT_EVIDENCE"]
+    r2 -->|"yes"| r3["3 Verifier panel<br/>presence, quantitative, skeptic"] --> r4["4 Consensus<br/>quantitative check can veto"] --> r5{"5 Govern"}
+  end
+  ins --> human
+  r5 -->|"critical, non-compliant, disagreement, or gap"| human["Human reviewer<br/>approve or override with justification"]
+  r5 -->|"otherwise"| acc["Auto-accept"]
+  orch -.->|"every step"| log[("Hash-chained audit log<br/>and checkpoint")]
+  human --> rep["Report<br/>findings, gaps, remediation, evidence appendix, chain head hash"]
+  acc --> rep
 ```
- Regulation text (GDPR/SOC 2/DORA PDF) ─▶ [Requirement extractor agent + human sign-off] ─▶ requirements.json (versioned)
-                                                       {id, text, severity, check:{type,param}, keywords}
- Evidence sources: policies (Confluence/SharePoint), configs (IaC), tickets (Jira), HR records ─▶ ingest ─▶ sentence/chunk index
-                                                                                                               │
- ┌───────────────────────────────────── AuditMesh orchestrator (async, checkpointed per requirement) ─────────┴────────────┐
- │ for each requirement (bounded concurrency, e.g. 8):                                                                       │
- │   1 RETRIEVE  top-k evidence (BM25 + dense, RRF)                                                                          │
- │   2 GROUND    keep only quotes found verbatim in source (offset recorded)  ── none ──▶ INSUFFICIENT_EVIDENCE             │
- │   3 PANEL     PresenceVerifier ∥ QuantitativeVerifier ∥ SkepticVerifier   (timeouts, retries, fallbacks per agent)       │
- │   4 CONSENSUS confidence-weighted vote → verdict + agreement ratio                                                        │
- │   5 GOVERN    critical OR NON_COMPLIANT OR agreement<0.67 ⇒ human review queue (SLA timer); else auto-accept              │
- │   6 RECORD    append {step, inputs-hash, outputs, model/prompt versions} to hash-chained audit log; checkpoint finding   │
- └──────────────┬─────────────────────────────────────────────────────────────┬───────────────────────────────────────────┘
-                ▼                                                             ▼
-        Reviewer UI (side-by-side quote vs requirement; approve/override + justification)        Report builder: findings, gaps, remediation tasks (Jira),
-                │ overrides logged to the same chain; become labeled eval data (Module 14)         evidence appendix, audit-chain head hash, signed PDF
- Boundaries: documents stay in-tenant (Module 12 isolation); LLM calls masked (Module 13) and routed via OmniGuard (Module 15).
- State per requirement: PENDING → RETRIEVED → GROUNDED → VOTED → (AUTO_ACCEPTED | IN_REVIEW → RESOLVED)
-```
+
+Requirement states: PENDING, RETRIEVED, GROUNDED, VOTED, then AUTO_ACCEPTED or IN_REVIEW and RESOLVED. Documents stay in-tenant (Module 12), and model calls are masked (Module 13) and routed through OmniGuard (Module 15).
 
 # Architectural Trade-Off Matrix
 

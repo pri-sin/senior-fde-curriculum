@@ -12,27 +12,19 @@ Tool design rule: few, well-named, narrowly scoped tools beat one `run_anything`
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  agent["Agent or LLM client"] -->|"MCP: initialize, tools/list, tools/call<br/>OAuth2 bearer token"| v
+  subgraph srv["MCP server (async)"]
+    v["1 Validate arguments<br/>JSON Schema or Pydantic"] --> az["2 Authorize<br/>caller scopes cover tool scopes"] --> rl["3 Rate limit and circuit breaker<br/>per backend"] --> ad["4 Call adapter<br/>timeout, jittered retry"] --> rd["5 Redact, truncate, audit"]
+  end
+  ad --> sql["SQL adapter<br/>read-only role, bound params, row cap"] --> db[("Postgres or Oracle")]
+  ad --> soap["SOAP adapter<br/>XML envelope, fault mapping"] --> erp[("ERP")]
+  ad --> rest["REST adapter (Jira)<br/>429 with Retry-After, idempotency keys"] --> jira[("Jira Cloud")]
+  rd -->|"result: content, isError, structured data"| agent
 ```
- Agent / LLM client ──(MCP over streamable HTTP, OAuth2 bearer, Module 12)──▶ ┌──────────── MCP server (async) ────────────┐
-        │ initialize ─────────────────────────────────────────────────────▶ │ capabilities {tools}                       │
-        │ tools/list ─────────────────────────────────────────────────────▶ │ registry: name → (schema, handler, policy) │
-        │ tools/call {name, arguments} ───────────────────────────────────▶ │ 1 validate args (JSON Schema/Pydantic)     │
-        │                                                                   │ 2 authz: caller scopes ⊇ tool scopes       │
-        │                                                                   │ 3 rate limit + circuit breaker per backend │
-        │                                                                   │ 4 call adapter (timeout, retry w/ jitter)  │
-        │ ◀── result {content[], isError, structured}  ◀────────────────────│ 5 redact + truncate + audit log            │
-                                                                            └───────┬─────────────┬──────────────┬───────┘
-                                                                                    ▼             ▼              ▼
-                                                                          SQL adapter      SOAP adapter     REST adapter (Jira)
-                                                                          read-only role   XML envelope     429 → Retry-After
-                                                                          param queries    WS-Security      pagination, JQL allowlist
-                                                                          row cap          fault→error      idempotency keys on writes
-                                                                                    │             │              │
-                                                                          ──────── private network / VPN boundary ────────
-                                                                          Postgres/Oracle    ERP (SAP/Oracle EBS)   Jira Cloud
- Failure handling: breaker states CLOSED → OPEN (after N failures) → HALF_OPEN (probe) → CLOSED; open breaker returns
- {isError:true, retryable:true, retry_after_s} immediately, shielding the backend.
-```
+
+Circuit breaker states: CLOSED, then OPEN after N failures, then HALF_OPEN for a probe, then CLOSED again. An open breaker returns isError with retryable and retry_after_s immediately, which shields the backend.
 
 # Architectural Trade-Off Matrix
 

@@ -12,23 +12,19 @@ The golden rule: the model is not a security boundary. Anything it could be tric
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  user["User"] -->|"OIDC code flow with PKCE"| idp["Identity provider<br/>Okta or Entra ID"]
+  idp -->|"JWT, 10 min lifetime"| spa["Browser or SPA"]
+  spa -->|"Authorization: Bearer"| a1
+  subgraph gw["API gateway and app (private subnet)"]
+    a1["1 Verify JWT<br/>alg allowlist, kid to JWKS, iss, aud, exp, nbf"] --> a2["2 Build RequestContext<br/>tenant from the token claim only"] --> a3["3 Authorize<br/>RBAC, deny by default"] --> a4["4 Retrieve with injected filter<br/>tenant_id AND ACL groups"] --> a5["5 LLM answers from returned chunks only"] --> a6["6 Audit log to SIEM"]
+  end
+  a4 --> vdb[("Vector DB<br/>payload index on tenant_id")]
+  a4 --> pg[("Postgres<br/>row-level security")]
 ```
- User ──OIDC code+PKCE──▶ IdP (Okta/Entra) ──id/access token (JWT, 10 min)──▶ Browser/SPA
-                                                                                │ Authorization: Bearer <jwt>
-                                                                                ▼
- ┌──────────────────────────────────── API gateway / app (private subnet) ─────────────────────────────────────┐
- │ 1 verify JWT: alg ∈ {RS256,ES256}, kid→JWKS (cached, refreshed on unknown kid, rate-limited)                │
- │   check iss, aud, exp, nbf (leeway 30 s), required claims {sub, tid, roles}                                │
- │ 2 build RequestContext {tenant_id=tid, user=sub, roles, groups}      ← the ONLY source of tenant identity    │
- │ 3 authorize(permission "docs:search") via RBAC; deny by default                                              │
- │ 4 retrieval: filter = {tenant_id: ctx.tenant_id} ∧ {acl ∩ ctx.groups ≠ ∅}   (injected by server code)       │
- │ 5 LLM prompt built ONLY from returned chunks; answer cites chunk ids                                         │
- │ 6 audit: {user, tenant, filter_hash, chunk_ids, decision}  → SIEM                                            │
- └───────────────┬──────────────────────────────────────────────────────────┬──────────────────────────────────┘
-                 ▼ (network boundary: only the app role can reach)           ▼
-        Vector DB  (payload index on tenant_id; large tenants → own collection/namespace)     Postgres (RLS: tenant_id = current_setting('app.tenant'))
- Failure posture: any missing/invalid claim ⇒ 401; missing tenant filter in a query ⇒ the store refuses to execute (fail closed).
-```
+
+Fail-closed posture: a missing or invalid claim returns 401, and a store query without a tenant filter refuses to run.
 
 # Architectural Trade-Off Matrix
 

@@ -10,23 +10,29 @@ Budgets are as important as accuracy: a latency budget (e.g. p95 < 3 s) and cost
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  apps["App services<br/>OpenAI-compatible API"] --> g1
+  subgraph gw["LLM gateway (stateless)"]
+    g1["Auth with team key"] --> g2["Budget check and rate limit"] --> g3{"Cache hit?"}
+    g3 -->|"yes"| hit["Return cached answer<br/>cost 0"]
+    g3 -->|"no"| g4["Router: provider A, then B, then C<br/>timeout, jittered retry, fallback"] --> g5["Span: model, tokens, latency, cost, fallback"]
+  end
+  g4 --> pa["Provider A"]
+  g4 --> pb["Provider B"]
+  g4 --> vl["Self-hosted vLLM"]
+  g5 -->|"async batch export"| lf["Langfuse or OTel collector"] --> dash["Dashboards: p50, p95, p99, cost per request, fallback rate<br/>Alerts: budget burn, p95 over SLO, quality drop"]
 ```
- app services ──(OpenAI-compatible API)──▶ ┌──────────────── LLM Gateway (LiteLLM-style, stateless x N) ───────────────┐
-                                           │ auth (team key) → budget check (Redis: spend today vs cap) → rate limit    │
-                                           │ cache lookup (exact + semantic) ── hit ──▶ return (cost $0, ~15 ms)        │
-                                           │ router: model group "chat-prod" = [provider A (primary), B, C]             │
-                                           │    timeout 8 s → retry w/ jitter → fallback to next provider               │
-                                           │ span: {trace_id, model, in/out tokens, latency, cost, status, fallback_used}│
-                                           └───────┬───────────────┬────────────────┬───────────────────────────────────┘
-                                                   ▼               ▼                ▼
-                                              Provider A      Provider B       Self-hosted vLLM
-                                                   └───────────────┴────────────────┘
-        spans ──async batch export──▶ Langfuse / OTel collector ──▶ dashboards: p50/p95/p99, $/request, error & fallback rate
-                                                                 └─▶ alerts: budget burn, p95 > SLO, quality score drop
- OFFLINE EVAL LOOP:  golden set (500 Q/A + sources) ──▶ run pipeline version N ──▶ RAGAS-style metrics ──▶ compare with baseline
-                     regression > threshold ⇒ CI fails ⇒ no deploy.      ONLINE: sample 2% of prod traces → LLM-judge + user thumbs.
- Boundary: prompts/outputs are masked (Module 13) before leaving the gateway to the observability backend.
+
+```mermaid
+flowchart LR
+  golden["Golden set<br/>500 questions with sources"] --> run["Run pipeline version N"] --> met["RAGAS-style metrics<br/>faithfulness, relevancy, context precision"] --> cmp{"Regression<br/>vs baseline?"}
+  cmp -->|"yes"| fail["CI fails, no deploy"]
+  cmp -->|"no"| ship["Deploy"]
+  prod["2% sampled production traces"] --> judge["LLM judge and user thumbs"] --> met
 ```
+
+Prompts and outputs are masked (Module 13) before they leave the gateway for the observability backend. The lower diagram is the offline evaluation loop plus online sampling.
 
 # Architectural Trade-Off Matrix
 

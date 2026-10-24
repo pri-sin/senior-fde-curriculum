@@ -12,7 +12,7 @@ Each module in `modules/<NN_name>/` contains exactly three files:
 
 ## Read it as a web page
 
-`docs/index.html` is a single-file reader for all 16 modules (concepts, system design prep and lab code, with a module index and light/dark themes). Open it in a browser, or turn on GitHub Pages for the `main` branch with the `/docs` folder to host it. It loads the `marked` library from a CDN, so it needs an internet connection. It is generated from the module files, so regenerate it after editing any of them.
+`docs/index.html` is a single-file reader for all 16 modules (concepts, system design prep and lab code, with a module index and light/dark themes). Open it in a browser, or turn on GitHub Pages for the `main` branch with the `/docs` folder to host it. It loads `marked` and `mermaid` from CDNs, so it needs an internet connection. The architecture diagrams in each module README are Mermaid flowcharts, which GitHub also renders natively. It is generated from the module files, so regenerate it after editing any of them.
 
 ## Learning path
 

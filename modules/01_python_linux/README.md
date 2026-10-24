@@ -11,23 +11,18 @@ Mental model in three rules:
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  sig["SIGTERM"] --> stop["stop_event.set()<br/>stop accepting work"]
+  prod["Producers<br/>HTTP or Kafka"] -->|"put() blocks when full: backpressure"| q["Bounded queue<br/>maxsize 1000"]
+  q -->|"get()"| w["N worker tasks<br/>per-attempt timeout<br/>retry with jittered backoff"]
+  w --> sem["Semaphore<br/>max 20 upstream calls"] --> up["Upstream API<br/>network boundary"]
+  w -.->|"CPU-bound work"| ex["Thread or process pool<br/>run_in_executor"]
+  stop -.->|"drain in-flight work, then exit"| w
+  w --> mon["Loop-lag monitor, /proc RSS and fd count<br/>JSON logs to stdout"]
 ```
-                      ┌──────────────────────── Linux pod / cgroup (mem 2Gi, cpu 2) ───────────────────────┐
- SIGTERM ───────────▶ │ signal handler ──▶ stop_event.set()                                               │
-                      │                                                                                    │
- producers ──items──▶ │  ┌────────────────┐   get()   ┌──────────────────────┐   ┌───────────────────────┐ │
- (HTTP/Kafka)         │  │ bounded Queue  │ ────────▶ │ N workers (tasks)    │──▶│ Semaphore(upstream=20)│─┼──▶ upstream API
-   ▲  put() blocks    │  │ maxsize=1000   │           │  retry+backoff+jitter│   └───────────────────────┘ │      (network boundary)
-   └─ backpressure ───│  └────────────────┘           │  timeout per attempt │                             │
-                      │                               └─────────┬────────────┘                             │
-                      │                          CPU-bound?     │ run_in_executor                          │
-                      │                               ┌─────────▼────────────┐                             │
-                      │                               │ ThreadPool / ProcPool│                             │
-                      │  loop-lag monitor (sleep 100ms, measure drift) ──▶ metrics / JSON logs ──▶ stdout   │
-                      │  /proc/self/{status,fd}  ──▶ RSS, open fds                                         │
-                      └────────────────────────────────────────────────────────────────────────────────────┘
- State transitions per job:  QUEUED ──▶ RUNNING ──▶ (RETRYING ↺) ──▶ DONE | FAILED | DROPPED(shutdown)
-```
+
+Job states: QUEUED, RUNNING, RETRYING (loops back to RUNNING), then DONE, FAILED, or DROPPED when shutdown outlasts the drain timeout.
 
 # Architectural Trade-Off Matrix
 

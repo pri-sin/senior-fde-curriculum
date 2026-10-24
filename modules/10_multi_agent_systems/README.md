@@ -11,28 +11,27 @@ More agents is not automatically better: every hop adds latency, cost and a new 
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  req["Request"] --> sup["Supervisor<br/>budget 60k tokens, 45 s deadline, max depth 2"]
+  sup --> res["Researcher<br/>fallback: cache"]
+  sup --> pol["Policy checker<br/>fallback: rules only"]
+  sup --> a["Risk scorer A"]
+  sup --> b["Risk scorer B"]
+  sup --> c["Risk scorer C"]
+  a --> cons["Consensus<br/>verdict and agreement ratio"]
+  b --> cons
+  c --> cons
+  res --> merge["Supervisor merge<br/>proposed action"]
+  pol --> merge
+  cons --> merge
+  merge --> gov{"Governance policy engine"}
+  gov -->|"low risk"| auto["Auto-execute"] --> audit["Audit log"]
+  gov -->|"high risk"| queue["Approval queue"] --> human["Human approve or reject"] --> audit
+  gov -->|"forbidden"| blk["Block and alert"] --> audit
 ```
- request ─▶ [Supervisor agent]  budget: 60k tokens, 45 s deadline, max depth 2
-              │ plan: tasks[] with owners, dependencies
-              ▼
-   ┌──────────┴───────────── parallel fan-out (asyncio.gather, per-task timeout) ───────────────┐
-   ▼                         ▼                          ▼                                       ▼
- [Researcher]           [Policy checker]          [Risk scorer A]  [Risk scorer B]  [Risk scorer C]   ← consensus panel
-   │ tools: search       │ tools: rules KB          (different prompts/models, independent contexts)
-   │ fallback: cache     │ fallback: rules-only            │               │               │
-   └──────────┬──────────┴──────────────┬──────────────────┴───────┬───────┴───────────────┘
-              ▼                         ▼                          ▼
-        results[]              consensus(votes) → verdict + agreement ratio
-              ▼
-        [Supervisor merge] ──▶ proposed_action {type, amount, reversible}
-              ▼
-        [Governance policy engine]
-           risk LOW  ──▶ auto-execute ──▶ audit log
-           risk HIGH ──▶ approval queue ──▶ human approve/reject (SLA timer) ──▶ execute / abort ──▶ audit log
-           FORBIDDEN ──▶ block + alert
- Boundaries: each worker has its own credentials (least privilege); only the executor can call write APIs.
- State per task: PENDING → RUNNING → (OK | RETRIED | FALLBACK | FAILED); per decision: AUTO | NEEDS_APPROVAL | BLOCKED.
-```
+
+The three scorers use different prompts or models and independent contexts. Each worker has its own credentials, and only the executor can call write APIs.
 
 # Architectural Trade-Off Matrix
 

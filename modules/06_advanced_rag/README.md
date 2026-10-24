@@ -11,24 +11,26 @@ Why one search method is not enough:
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  subgraph Ingest["Ingest (offline)"]
+    docs["Documents"] --> parse["Parse"] --> chunk["Chunker: recursive, 400 tokens, 15% overlap<br/>metadata: doc, section, tenant, ACL, version"]
+    chunk --> emb["Batch embed"] --> vec[("Vector index<br/>HNSW")]
+    chunk --> tok["Tokenize"] --> inv[("Inverted index<br/>BM25")]
+  end
+  subgraph Query["Query (online, p95 under 400 ms before the LLM)"]
+    uq["User query"] --> rw["Query rewrite (optional)"]
+    rw --> dense["Dense top 50"]
+    rw --> sparse["Sparse top 50"]
+    dense --> rrf["RRF fusion, k = 60"]
+    sparse --> rrf
+    rrf --> rr["Cross-encoder rerank"] --> top["Top 5 chunks with citations"] --> llm["LLM prompt (Module 05 budgeter)"]
+  end
+  vec -.-> dense
+  inv -.-> sparse
 ```
- INGEST (offline/async)                                           QUERY (online, target p95 < 400 ms before LLM)
- ──────────────────────                                           ──────────────────────────────────────────────
- docs ─▶ parse ─▶ chunker (recursive, 400 tok, 15% overlap)        user query ─▶ query rewrite/expansion (optional)
-              │  metadata: doc_id, section, tenant, acl, version               │
-              ├──▶ embed (batch, async) ──▶ Vector index (HNSW)                ├───────────────┬───────────────┐
-              └──▶ tokenize ─────────────▶ Inverted index (BM25)               ▼               ▼               │
-                                                                        dense top-50     sparse top-50   (parallel, asyncio.gather)
-                                                                               └───────┬───────┘
-                                                                                       ▼
-                                                                        RRF fusion (k=60) → top-50 unique
-                                                                                       ▼
-                                                                  cross-encoder rerank (batch, ~60 ms/50 pairs on GPU)
-                                                                                       ▼
-                                                                  top-5 chunks + citations ─▶ LLM prompt (Module 05 budgeter)
- Boundaries: index tier in private subnet; metadata filter (tenant/ACL) applied INSIDE both retrievers (Module 12).
- State: chunk versions are immutable; re-index builds a new index and swaps an alias (blue/green) to avoid partial updates.
-```
+
+Tenant and ACL filters are applied inside both retrievers (Module 12). Re-indexing builds a new index and swaps an alias (blue/green), so updates are never partial.
 
 # Architectural Trade-Off Matrix
 

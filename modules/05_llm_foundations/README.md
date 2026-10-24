@@ -10,26 +10,19 @@ Temperature near 0 gives repeatable extraction; higher values add variety. Neith
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  req["Caller request"] --> asm["Prompt assembler<br/>system prompt, few-shot examples,<br/>retrieved context, history"]
+  asm --> bud{"Token budgeter<br/>limit = model context - output - margin"}
+  bud -->|"fits"| llm["LLM client<br/>timeout, backoff on 429 and 5xx, temperature 0"]
+  bud -->|"over budget: trim lowest priority, log drops"| llm
+  llm --> parse["Parse and Pydantic validate"]
+  parse -->|"valid"| typed["Typed object<br/>DB write or API response"]
+  parse -->|"ValidationError"| repair["Re-ask with bad output and exact errors<br/>max 2 repairs"] --> llm
+  parse -->|"still invalid"| dlq["ExtractionFailed<br/>DLQ or human review"]
 ```
- caller ──request──▶ [Prompt assembler]
-                       │ system prompt (fixed, ~600 tok)
-                       │ + few-shot examples (budgeted)
-                       │ + retrieved context (ranked, truncated to budget)
-                       │ + conversation history (newest-first until budget)
-                       ▼
-                 [Token budgeter]  limit = model_ctx − reserved_output − safety_margin
-                       │ over budget? drop/trim by priority, record what was dropped
-                       ▼
-                 [LLM client]  timeout, retry (429/5xx, exp. backoff + jitter), temperature=0
-                       │  raw text / tool-call JSON
-                       ▼
-                 [Parser + Pydantic validate]
-                   ok ─────────────▶ typed object ──▶ downstream (DB write, API response)
-                   ValidationError ─▶ append {assistant: bad output, user: errors} ─▶ re-ask (max 2)
-                   still invalid ───▶ raise ExtractionFailed → DLQ / human review
- metrics at every hop: input_tokens, output_tokens, cost, latency, repair_count
- network boundary: only [LLM client] talks to the provider; PII redaction happens before it (Module 13).
-```
+
+Metrics at every hop: input tokens, output tokens, cost, latency, repair count. Only the LLM client talks to the provider, and PII redaction (Module 13) happens before it.
 
 # Architectural Trade-Off Matrix
 

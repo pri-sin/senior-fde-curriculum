@@ -8,23 +8,20 @@ An LLM-backed API is not a normal CRUD API. A request can last 30 seconds, produ
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  client["Browser or SDK"] -->|"POST /v1/chat/stream over TLS"| lb["L7 load balancer<br/>idle timeout 300 s, response buffering off"]
+  lb --> auth["Auth middleware<br/>JWT gives tenant_id"]
+  auth --> tb{"Token bucket<br/>acquire(tenant, cost)"}
+  tb -->|"denied"| r429["429 + Retry-After<br/>no upstream cost"]
+  tb -->|"allowed"| sess["Stream session<br/>bounded queue of 64 events"]
+  sess <-->|"prompt out, tokens back"| llm["LLM provider"]
+  sess -->|"text/event-stream, ': ping' every 15 s"| client
+  sess -.->|"queue full for 5 s: drop slow client, cancel upstream"| llm
+  ws["WebSocket /v1/chat/ws"] -.->|"client sends cancel frame"| sess
 ```
- Browser / SDK                      Edge                         API tier (FastAPI, uvicorn x N)                       Upstream
- ─────────────                 ─────────────                 ───────────────────────────────────────────           ───────────────
-  POST /v1/chat/stream ──TLS──▶ L7 LB (idle timeout 300s) ──▶ [auth middleware: JWT → tenant_id]
-        ▲                        no response buffering              │
-        │                                                           ▼
-        │                                              [TokenBucket.acquire(tenant, cost)]
-        │                                               │ denied ───▶ 429 + Retry-After  (fast path, no upstream cost)
-        │                                               ▼ allowed
-        │                                  [per-request task: bounded asyncio.Queue(maxsize=64)]
-        │                                     producer: upstream LLM stream ──────────────────────────────▶ LLM provider
-        │   text/event-stream                 consumer: yield "event: token\ndata: {...}\n\n"  ◀── tokens ──┘
-        └◀──────── tokens ─────────────────────  heartbeat comment ": ping" every 15s (keeps proxies open)
-        │    queue full for > 5s ⇒ drop client (slow consumer), cancel upstream to stop spend
-  WS /v1/chat/ws ◀──────────────▶ same pipeline; client frames {"type":"cancel"} cancel the upstream call
- State per request: ADMITTED → STREAMING → (COMPLETED | CANCELLED | CLIENT_SLOW | UPSTREAM_ERROR)
-```
+
+Request states: ADMITTED, STREAMING, then COMPLETED, CANCELLED, CLIENT_SLOW, or UPSTREAM_ERROR.
 
 # Architectural Trade-Off Matrix
 

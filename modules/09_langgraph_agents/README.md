@@ -11,32 +11,24 @@ The lab implements these semantics from scratch (state reducers, conditional edg
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  api["POST /runs with thread_id and input"] --> load["Load latest checkpoint<br/>or start at entry"]
+  load --> plan["plan"] --> draft["draft"]
+  draft -->|"needs tool"| tools["tools<br/>retry, backoff, timeouts"] --> draft
+  draft --> critic["critic"]
+  critic -->|"revise (max 3 cycles)"| draft
+  critic -->|"approve"| gate{"High-risk action?"}
+  gate -->|"yes"| hum["Human gate<br/>INTERRUPT: persist state, return 202"]
+  hum -->|"POST /runs/id/resume"| fin["finish"]
+  gate -->|"no"| fin
+  fin --> done["END"]
+  plan -.->|"checkpoint after every node"| cp[("Checkpoint store<br/>Postgres, SQLite, or Redis")]
+  critic -.-> cp
+  fin -.-> cp
 ```
- client ─▶ POST /runs {thread_id, input}
-              │
-              ▼
-        ┌───────────────────────────── Graph runtime (async worker, stateless) ────────────────────────────┐
-        │  load latest checkpoint(thread_id)  ──▶ state S, next_node N   (or start at ENTRY)               │
-        │                                                                                                   │
-        │   ┌────────┐  ok    ┌────────┐  needs_tool ┌────────┐                                           │
-        │   │ plan   │──────▶│ draft  │────────────▶│ tools  │──┐ (retry/backoff, timeouts)               │
-        │   └────────┘        └───┬────┘             └────────┘  │                                         │
-        │                         ▼◀────────────────────────────┘                                         │
-        │                    ┌────────┐  revise (cycle, max 3)                                            │
-        │                    │ critic │───────────────▶ back to draft                                     │
-        │                    └───┬────┘                                                                   │
-        │             approve    │ high-risk action?                                                      │
-        │                        ▼                                                                         │
-        │                  ┌───────────┐  INTERRUPT: persist, return 202 "awaiting_approval"              │
-        │                  │ human gate│◀───── POST /runs/{id}/resume {approved: true}                    │
-        │                  └─────┬─────┘                                                                   │
-        │                        ▼                                                                         │
-        │                     finish ──▶ END                                                              │
-        │  after EVERY node:  checkpoint.put(thread_id, step, state, next_node)   (Postgres/SQLite/Redis)  │
-        └───────────────────────────────────────────────────────────────────────────────────────────────────┘
- Failure model: crash between nodes ⇒ resume at next_node; crash inside a node ⇒ node re-runs ⇒ nodes must be idempotent
- (use idempotency keys for side-effecting tools). Recursion limit (e.g. 25 steps) raises GraphRecursionError.
-```
+
+Failure model: a crash between nodes resumes at next_node. A crash inside a node re-runs that node, so side-effecting tools need idempotency keys. A recursion limit (for example 25 steps) raises GraphRecursionError.
 
 # Architectural Trade-Off Matrix
 

@@ -10,28 +10,26 @@ Practical rule: use structured parsing for text-heavy, table-heavy compliance do
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  doc["PDF, scan, or PPTX"] --> router{"Router"}
+  router -->|"born-digital"| tl["Text layer and layout parse"]
+  router -->|"scanned"| ocr["OCR and layout model"]
+  tl --> el["Element stream<br/>title, text, table, figure, footer<br/>with bbox, page, confidence"]
+  ocr --> el
+  el --> tab["Table pipeline<br/>cell grid, header-aware row records"]
+  el --> txt["Text pipeline<br/>reading order, section breadcrumbs"]
+  el --> img["Page-image pipeline (optional)<br/>render at 150 dpi, ColPali patch vectors"]
+  tab --> idx[("Hybrid index (Module 06)<br/>metadata: doc, page, bbox, type")]
+  txt --> idx
+  img --> mv[("Multi-vector index<br/>late interaction")]
+  idx --> ans["Retrieve, then LLM or VLM<br/>answer with page and bbox citation"]
+  mv --> ans
+  el -.->|"confidence under 0.8"| rev["Review queue"]
+  tab -.->|"sum checks fail"| rev
 ```
- PDF / scan / PPTX ──▶ [Router: born-digital? scanned? mixed?]
-                          │ born-digital                      │ scanned
-                          ▼                                   ▼
-                  text layer + layout parse           OCR (Tesseract/Textract) + layout model
-                          └──────────────┬───────────────────┘
-                                         ▼
-                      Element stream: Title | Text | Table | Figure | Header/Footer  (bbox, page, confidence)
-                                         │
-       ┌─────────────────────────────────┼─────────────────────────────────────┐
-       ▼                                 ▼                                     ▼
- Table pipeline                    Text pipeline                        Page-image pipeline (optional)
- cell grid → header-aware rows     reading order, heading path          render page @150 dpi → ColPali patches
- → "row-as-record" chunks          chunks w/ section breadcrumbs        → multi-vector index (late interaction)
-       └──────────────┬──────────────────┘                                     │
-                      ▼                                                         │
-          Hybrid index (Module 06)   ◀── metadata: doc, page, bbox, element_type ┘
-                      ▼ query
-          retrieve → (tables as Markdown / page image) → LLM or VLM → answer + {page, bbox} citation
- Quality gates: low-confidence element (<0.8) → review queue; numeric cells re-validated (sum checks, units).
- Boundary: documents and page images stay in-VPC; VLM inference self-hosted or via private endpoint.
-```
+
+Documents and page images stay inside the VPC. VLM inference is self-hosted or reached through a private endpoint.
 
 # Architectural Trade-Off Matrix
 

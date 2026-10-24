@@ -13,23 +13,24 @@ Use it when relationships matter (ownership, dependencies, org charts, fraud rin
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  subgraph Ingest["Ingest"]
+    docs["Documents"] --> chunk["Chunk"] --> ext["LLM extractor<br/>ontology-constrained triples"]
+    ext --> val{"Allowed types and<br/>confidence at least 0.6?"}
+    val -->|"no"| rq["Review queue"]
+    val -->|"yes"| er["Entity resolution<br/>normalize, alias, fuzzy match"] --> neo[("Neo4j<br/>idempotent MERGE, batched UNWIND")]
+  end
+  subgraph Query["Query"]
+    q["Question"] --> link["Entity linker<br/>alias table and embeddings"] --> plan["Cypher planner<br/>templates or LLM"]
+    plan --> guard{"Cypher guard<br/>read-only, depth at most 3, LIMIT, allowed labels"}
+    guard -->|"rejected"| rej["Refuse and log"]
+    guard -->|"ok"| rep[("Neo4j read replica<br/>2 s timeout")] --> ctx["Context builder<br/>triples, evidence, citations"] --> llm["LLM answer"]
+  end
+  neo -.->|"replication"| rep
 ```
- INGEST                                                                   QUERY
- docs ─▶ chunk ─▶ LLM extractor (ontology-constrained JSON, Module 05)    question ─▶ entity linker (alias table + embedding)
-                      │ Triple{head,rel,tail,evidence,confidence}                          │ seed node ids
-                      ▼                                                                    ▼
-              validator: allowed types? confidence >= 0.6? ──reject──▶ review queue     [Cypher planner]
-                      │                                                  (LLM or templates) ─▶ Cypher + params
-                      ▼                                                                    ▼
-              entity resolution (normalize, alias, fuzzy, blocking)          [Cypher guard]: read-only, depth<=3, LIMIT, labels
-                      ▼                                                                    ▼
-              MERGE into Neo4j  (n:Company {id}) -[:OWNS {doc,span}]->            Neo4j (read replica, timeout 2s)
-              (idempotent upserts, batched UNWIND, async driver)                           │ subgraph rows
-                                                                                           ▼
-                                                          [Context builder: triples + evidence snippets + citations] ─▶ LLM answer
- Boundaries: Neo4j in data subnet; app role has READ on query path, WRITE only on the ingest worker role.
- Tenant isolation: tenant_id property on every node/edge, injected by the guard, never by the model.
-```
+
+The app role has READ on the query path and WRITE only on the ingest worker. A tenant_id property sits on every node and edge and is injected by the guard, never by the model.
 
 # Architectural Trade-Off Matrix
 

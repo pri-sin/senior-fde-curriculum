@@ -14,26 +14,21 @@ This capstone composes Modules 02, 05, 12, 13 and 14. Read their READMEs first; 
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  cl["Clients<br/>60 apps, 4,000 end-tenants"] --> lb["L7 load balancer and WAF"] --> p1
+  subgraph pipe["OmniGuard gateway pods (async, stateless)"]
+    p1["1 Auth<br/>verify JWT, derive tenant"] --> p2["2 Admit<br/>token bucket, bulkhead, budget"] --> p3["3 Input<br/>PII mask, injection score"] --> p4["4 Route<br/>breaker, timeout, retry, fallback"] --> p5["5 Stream<br/>SSE, cancel upstream on disconnect"] --> p6["6 Output rails"] --> p7["7 Account<br/>usage, cost, trace span"]
+  end
+  p1 -.->|"401"| rej["Rejected fast<br/>401, 429, 402, or 400 with Retry-After"]
+  p2 -.->|"429 or 402"| rej
+  p3 -.->|"400"| rej
+  p2 <--> redis[("Redis<br/>buckets, spend, breaker state")]
+  p4 --> provs["Providers A and B<br/>self-hosted vLLM"]
+  p7 --> tel["Telemetry<br/>OTel to Langfuse and ClickHouse"]
 ```
- Clients (60 apps, 4,000 end-tenants) ──TLS──▶ L7 LB / WAF ─────────────────────────────────────────────────────────┐
-                                                                                                                    ▼
- ┌────────────────────────────── OmniGuard gateway pods (async, stateless, N=6, 2 AZ) ────────────────────────────────────┐
- │ 1 AUTH      verify JWT (JWKS cache) → ctx{tenant, user, roles}                      reject: 401                        │
- │ 2 ADMIT     tenant token bucket (Redis Lua, cost-weighted)                          reject: 429 + Retry-After          │
- │             tenant bulkhead semaphore (max in-flight)                               reject: 429 (concurrency)          │
- │             budget check (spend ≥ cap?)                                             reject: 402/429 budget_exceeded    │
- │ 3 INPUT     normalize → PII mask (vault) → injection score ≥ block ⇒ 400 refuse                                        │
- │ 4 ROUTE     model group → providers [A, B, self-hosted]; breaker + timeout + jittered retry + fallback                  │
- │ 5 STREAM    provider tokens → bounded queue → SSE to client; client disconnect ⇒ cancel upstream (stop spend)           │
- │ 6 OUTPUT    secret/PII re-scan, canary check on the accumulating text; violation ⇒ terminate stream with error event    │
- │ 7 ACCOUNT   usage → cost → tenant spend (Redis INCRBYFLOAT) → span {trace_id, tenant, model, tokens, ms, fallback}      │
- └──────┬───────────────────────────┬──────────────────────────┬────────────────────────────┬────────────────────────────┘
-        ▼                           ▼                          ▼                            ▼
-   Redis cluster               Provider A/B (public,       Self-hosted vLLM            Telemetry: OTel → Langfuse/ClickHouse
-   buckets, spend, breaker     egress via NAT allowlist)   (in-VPC, GPU pool)          Alerts: budget burn, fallback rate, p95
- State per request: AUTHENTICATED → ADMITTED → MASKED → ROUTED → STREAMING → (COMPLETED | CANCELLED | BLOCKED | FAILED)
- Control plane (separate): tenant config (plan, limits, allowed models, PII mode), key rotation, policy versions, price tables.
-```
+
+Request states: AUTHENTICATED, ADMITTED, MASKED, ROUTED, STREAMING, then COMPLETED, CANCELLED, BLOCKED, or FAILED. A separate control plane holds tenant config, key rotation, policy versions, and price tables.
 
 # Architectural Trade-Off Matrix
 

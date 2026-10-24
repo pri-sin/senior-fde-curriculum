@@ -11,25 +11,26 @@ For a Forward Deployed Engineer this is client-facing: you will sit with a custo
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  corp["Customer network<br/>10.20.0.0/16"] -->|"VPN or Direct Connect"| tgw["Transit gateway (hub)<br/>route tables per trust domain"]
+  tgw --> app["vpc-app 10.30.0.0/16<br/>API pods, role app-runtime"]
+  tgw --> data["vpc-data 10.40.0.0/16<br/>RDS and vector DB"]
+  app -->|"5432/tcp, security group allows app SG only"| data
+  app <-->|"peering route 172.16.0.0/16"| vendor["vpc-vendor-ai 172.16.0.0/16<br/>model gateway via PrivateLink"]
+  app -->|"egress via NAT, FQDN allowlist"| inet["Internet"]
+  app -->|"VPC endpoints"| s3["S3 and KMS"]
 ```
- Customer corporate network (on-prem 10.0.0.0/8 slice 10.20.0.0/16)
-        │  IPsec VPN / Direct Connect  (boundary 1: customer ↔ cloud)
-        ▼
- ┌───────────────────────────── Transit Gateway (hub) ─────────────────────────────┐
- │  route tables:  10.20.0.0/16→VPN   10.30.0.0/16→vpc-app   10.40.0.0/16→vpc-data │
- └──────┬─────────────────────────────────────┬────────────────────────────┬───────┘
-        ▼                                     ▼                            ▼
- vpc-app 10.30.0.0/16                 vpc-data 10.40.0.0/16        vpc-vendor-ai 172.16.0.0/16 (peered, 1:1)
- ┌──────────────────────┐             ┌──────────────────────┐     ┌─────────────────────────┐
- │ private subnet       │──5432/tcp──▶│ RDS / vector DB      │     │ model gateway           │
- │ API pods             │  SG: allow  │ SG: ingress only     │     │ PrivateLink endpoint    │
- │ role: app-runtime    │  from app SG│ from app SG          │     │ (no public IP)          │
- └─────────┬────────────┘             └──────────────────────┘     └───────────▲─────────────┘
-           │ egress via NAT (allowlist FQDNs)   VPC endpoints for S3/KMS        │ peering route 172.16.0.0/16
-           └────────────────────────────────────────────────────────────────────┘
- IAM path:  pod → OIDC web identity → STS AssumeRole(app-runtime) → temp creds (1h) → policy eval (deny > allow)
- Flow decision order:  route lookup (LPM) → NACL → security group → (service) IAM policy → resource policy
+
+```mermaid
+flowchart LR
+  pod["Pod"] -->|"OIDC web identity"| sts["STS AssumeRole<br/>app-runtime"] --> creds["Temporary credentials<br/>1 hour"] --> ev{"Policy evaluation"}
+  ev -->|"any explicit Deny"| d1["Denied"]
+  ev -->|"Allow, no Deny"| ok["Allowed"]
+  ev -->|"nothing matches"| d2["Denied (implicit)"]
 ```
+
+Network decision order: route lookup (longest prefix match), then NACL, then security group, then the service's IAM policy, then the resource policy.
 
 # Architectural Trade-Off Matrix
 

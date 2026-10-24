@@ -10,23 +10,17 @@ Key habits:
 
 # Production Architecture & Data Flow
 
+```mermaid
+flowchart TD
+  dev["Developer push or PR"] --> ci["CI runner<br/>ephemeral, no long-lived credentials"]
+  ci --> s1["1 Lint and unit tests"] --> s2["2 Docker build (BuildKit)<br/>multi-stage, non-root runtime"] --> s3["3 Dockerfile policy check"] --> s4["4 SBOM and CVE scan<br/>fail on fixable CRITICAL or HIGH"] --> s5["5 Sign with cosign<br/>push by digest"]
+  s5 --> reg["Private registry<br/>immutable tags"]
+  reg --> gitops["GitOps (Argo CD)<br/>manifest pins image@sha256"]
+  gitops -->|"admission controller verifies signature"| cluster["Cluster<br/>readOnlyRootFilesystem, runAsNonRoot, drop ALL caps"]
+  cluster --> roll["Rolling update, maxUnavailable 0<br/>canary 5% then 100%<br/>auto-rollback on SLO burn"]
 ```
- Developer ──push/PR──▶ Git host ──webhook──▶ CI runner (ephemeral, no long-lived creds)
-                                               │
-        ┌──────────────────────────────────────┼─────────────────────────────────────────────────┐
-        │ stage 1  lint + unit tests           │ stage 2  docker build (BuildKit, cache mounts)    │
-        │ stage 3  Dockerfile policy check ────┤   builder ──COPY --from=builder──▶ runtime (nonroot)
-        │ stage 4  SBOM (syft) + CVE scan (grype/trivy): fail on CRITICAL/HIGH w/ fix                │
-        │ stage 5  sign (cosign, OIDC keyless) + push to registry by digest                          │
-        └──────────────────────────────────────┬─────────────────────────────────────────────────┘
-                                               ▼
-                  Registry (private, immutable tags)  ◀── admission controller verifies signature
-                                               │ GitOps (Argo CD) pulls manifest with image@sha256:…
-                                               ▼
-   Cluster:  Deployment (readOnlyRootFilesystem, runAsNonRoot, drop ALL caps, resource limits)
-             rolling update: maxUnavailable=0, readiness gate ──▶ canary 5% ──▶ 100% ──▶ auto-rollback on SLO burn
- Boundaries: [CI network] ─push→ [registry] ─pull→ [prod cluster]; secrets only via workload identity, never in layers.
-```
+
+Boundaries: CI network pushes to the registry, the production cluster pulls from it. Secrets arrive only through workload identity, never in image layers.
 
 # Architectural Trade-Off Matrix
 
