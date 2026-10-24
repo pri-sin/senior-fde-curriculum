@@ -123,14 +123,18 @@ class Identity(BaseModel, frozen=True):
 def verify_token(token: str, secret: bytes) -> Identity:
     try:
         head, body, sig = token.split(".")
-        if json.loads(_unb64(head)).get("alg") != "HS256":
+        header = json.loads(_unb64(head))
+        if not isinstance(header, dict) or header.get("alg") != "HS256":
             raise Unauthenticated("algorithm not allowed")
         if not hmac.compare_digest(hmac.new(secret, f"{head}.{body}".encode(), hashlib.sha256).digest(), _unb64(sig)):
             raise Unauthenticated("bad signature")
         c = json.loads(_unb64(body))
     except (ValueError, json.JSONDecodeError) as exc:
         raise Unauthenticated("malformed token") from exc
-    if c.get("iss") != "idp" or c.get("aud") != "omniguard" or c.get("exp", 0) < time.time() or not c.get("tid"):
+    # a validly signed token can still carry the wrong shape: every case below is a 401, never a 500
+    if not isinstance(c, dict) or not isinstance(c.get("sub"), str) or not isinstance(c.get("exp"), (int, float)):
+        raise Unauthenticated("invalid claims")
+    if c.get("iss") != "idp" or c.get("aud") != "omniguard" or c["exp"] < time.time() or not c.get("tid"):
         raise Unauthenticated("invalid claims")
     return Identity(tenant_id=c["tid"], user=c["sub"])
 
@@ -168,6 +172,52 @@ def output_violation(text: str) -> str | None:
     if "CANARY" in text:
         return "system_prompt_leak"
     return None
+
+
+class HoldbackRail:
+    """Never release the newest `window` chars, so a secret straddling frames is never half-sent.
+
+    `window` must be >= the shortest possible match (prefix + 16 chars = 19 for the KEY pattern). The cost is
+    ~`window` chars of added time-to-first-frame."""
+
+    def __init__(self, window: int = 32) -> None:
+        self.full, self.released, self.window = "", 0, window
+
+    def push(self, tok: str) -> tuple[str, str | None]:
+        """Returns (text safe to send now, violation or None)."""
+        self.full += tok
+        if (v := output_violation(self.full[max(0, self.released - self.window):])):
+            return "", v
+        safe_upto = max(self.released, len(self.full) - self.window)
+        out, self.released = self.full[self.released:safe_upto], safe_upto
+        return out, None
+
+    def flush(self) -> tuple[str, str | None]:
+        if (v := output_violation(self.full[max(0, self.released - self.window):])):
+            return "", v
+        out, self.released = self.full[self.released:], len(self.full)
+        return out, None
+
+
+class BudgetLedger:
+    """Reserve worst-case cost at admission, settle the real cost in `finally`.
+
+    hold() has no await between check and reserve, so it is atomic on the event loop: concurrent requests
+    cannot all pass a check that only sees settled spend."""
+
+    def __init__(self) -> None:
+        self.spent: defaultdict[str, float] = defaultdict(float)
+        self.held: defaultdict[str, float] = defaultdict(float)
+
+    def hold(self, tenant: str, cap_usd: float, worst_case_usd: float) -> float:
+        if self.spent[tenant] + self.held[tenant] + worst_case_usd > cap_usd:
+            raise BudgetExceeded("daily budget exhausted")
+        self.held[tenant] += worst_case_usd
+        return worst_case_usd
+
+    def settle(self, tenant: str, held_usd: float, actual_usd: float) -> None:
+        self.held[tenant] -= held_usd
+        self.spent[tenant] += actual_usd
 
 
 # ---------------- providers + router ----------------------------------------------------------------------
@@ -221,7 +271,8 @@ class OmniGuard:
         self.buckets = {t.tenant_id: TokenBucket(t.rate_per_s, t.burst) for t in tenants}
         self.bulkheads = {t.tenant_id: asyncio.Semaphore(t.max_in_flight) for t in tenants}
         self.global_sem = asyncio.Semaphore(global_in_flight)
-        self.spend: defaultdict[str, float] = defaultdict(float)
+        self.ledger = BudgetLedger()
+        self.spend = self.ledger.spent  # settled spend; reservations live in ledger.held
         self.providers, self.breakers = providers, {p.name: Breaker() for p in providers}
         self.spans: list[Span] = []
 
@@ -232,37 +283,42 @@ class OmniGuard:
         if cfg is None:
             raise Unauthenticated("unknown tenant")
         self.buckets[ident.tenant_id].take(1 + req.max_tokens / 128)   # 2 ADMIT (cost-weighted)
-        if self.spend[ident.tenant_id] >= cfg.daily_budget_usd:
-            raise BudgetExceeded("daily budget exhausted")
         bulkhead = self.bulkheads[ident.tenant_id]
         if bulkhead.locked():
             raise ConcurrencyLimited("tenant in-flight limit reached", retry_after_s=0.05)
         span = Span(trace_id=trace, tenant=ident.tenant_id, outcome="started")
         async with bulkhead:
-            masked, span.masked_entities = mask_pii(req.prompt)        # 3 INPUT
-            if INJECTION.search(masked):
-                span.outcome = "blocked_input"
-                self.spans.append(span)
-                raise RequestBlocked("prompt rejected by policy")
-            span.in_tokens = max(1, len(masked) // 4)
-            produced: list[str] = []
+            held = self.ledger.hold(ident.tenant_id, cfg.daily_budget_usd, self._worst_case_usd(req))  # 2b RESERVE
             try:
-                async with self.global_sem:
-                    async for frame in self._route_and_stream(masked, req.max_tokens, span, produced):
-                        yield frame
-                span.outcome = span.outcome if span.outcome != "started" else "completed"
-            except (asyncio.CancelledError, GeneratorExit):             # client disconnected: upstream generator is closed too
-                span.outcome = "cancelled"
-                raise
+                masked, span.masked_entities = mask_pii(req.prompt)    # 3 INPUT
+                if INJECTION.search(masked):
+                    span.outcome = "blocked_input"
+                    self.spans.append(span)
+                    raise RequestBlocked("prompt rejected by policy")
+                span.in_tokens = max(1, len(masked) // 4)
+                try:
+                    async with self.global_sem:
+                        async for frame in self._route_and_stream(masked, req.max_tokens, span):
+                            yield frame
+                    span.outcome = span.outcome if span.outcome != "started" else "completed"
+                except (asyncio.CancelledError, GeneratorExit):         # client disconnected: upstream generator is closed too
+                    span.outcome = "cancelled"
+                    raise
+                finally:
+                    span.ms = round((time.perf_counter() - t0) * 1000, 2)
+                    p = next((x for x in self.providers if x.name == span.provider), None)
+                    if p:
+                        span.cost_usd = (span.in_tokens * p.price_in + span.out_tokens * p.price_out) / 1e6
+                    self.spans.append(span)
             finally:
-                span.ms = round((time.perf_counter() - t0) * 1000, 2)
-                p = next((x for x in self.providers if x.name == span.provider), None)
-                if p:
-                    span.cost_usd = (span.in_tokens * p.price_in + span.out_tokens * p.price_out) / 1e6
-                    self.spend[ident.tenant_id] += span.cost_usd
-                self.spans.append(span)
+                self.ledger.settle(ident.tenant_id, held, span.cost_usd)
 
-    async def _route_and_stream(self, prompt: str, max_tokens: int, span: Span, produced: list[str]) -> AsyncIterator[str]:
+    def _worst_case_usd(self, req: ChatRequest) -> float:
+        """Upper bound used for the reservation: priciest provider, full max_tokens."""
+        in_tokens = max(1, len(req.prompt) // 4)
+        return (in_tokens * max(p.price_in for p in self.providers) + req.max_tokens * max(p.price_out for p in self.providers)) / 1e6
+
+    async def _route_and_stream(self, prompt: str, max_tokens: int, span: Span) -> AsyncIterator[str]:
         for rank, p in enumerate(self.providers):                       # 4 ROUTE
             if not self.breakers[p.name].allow():
                 continue
@@ -276,20 +332,34 @@ class OmniGuard:
             self.breakers[p.name].ok()
             span.provider, span.fallback = p.name, rank > 0
             chunks = [first]
+            rail = HoldbackRail()
             try:
                 while True:
                     for tok in chunks:                                  # 5 STREAM + 6 OUTPUT rails per chunk
-                        produced.append(tok)
-                        if (v := output_violation("".join(produced))):
+                        span.out_tokens += 1                            # billed whether or not the rail releases it
+                        text, v = rail.push(tok)
+                        if v:
                             span.outcome = f"blocked_output:{v}"
                             yield f"event: error\ndata: {json.dumps({'code': v})}\n\n"
                             return
-                        span.out_tokens += 1
-                        yield f"event: token\ndata: {json.dumps({'text': tok})}\n\n"
+                        if text:
+                            yield f"event: token\ndata: {json.dumps({'text': text})}\n\n"
                     try:
                         chunks = [await gen.__anext__()]
                     except StopAsyncIteration:
+                        text, v = rail.flush()
+                        if v:
+                            span.outcome = f"blocked_output:{v}"
+                            yield f"event: error\ndata: {json.dumps({'code': v})}\n\n"
+                            return
+                        if text:
+                            yield f"event: token\ndata: {json.dumps({'text': text})}\n\n"
                         yield "event: done\ndata: {}\n\n"
+                        return
+                    except ProviderError:                               # mid-stream failure: tokens already sent cannot be replayed
+                        self.breakers[p.name].bad()
+                        span.outcome = "provider_error_midstream"
+                        yield f"event: error\ndata: {json.dumps({'code': 'provider_error'})}\n\n"
                         return
             finally:
                 await gen.aclose()                                      # always stop upstream spend

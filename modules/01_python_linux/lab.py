@@ -73,10 +73,12 @@ class RetryPolicy(BaseModel):
 
 
 async def retry_async(fn: Callable[[], Awaitable[T]], policy: RetryPolicy, *, op: str) -> T:
-    """Exponential backoff with full jitter; only TransientUpstreamError/timeouts are retried."""
+    """Exponential backoff with full jitter; only TransientUpstreamError/timeouts are retried.
+
+    `fn` owns its per-attempt timeout, so time spent queueing for a semaphore is never charged to the upstream."""
     for attempt in range(1, policy.max_attempts + 1):
         try:
-            return await asyncio.wait_for(fn(), timeout=policy.attempt_timeout_s)
+            return await fn()
         except (TransientUpstreamError, asyncio.TimeoutError) as exc:
             if attempt == policy.max_attempts:
                 raise TransientUpstreamError(f"{op}: exhausted {attempt} attempts") from exc
@@ -198,8 +200,8 @@ class WorkerPool:
         t0 = time.perf_counter()
         try:
             async def attempt() -> str:
-                async with self._sem:
-                    return await self._upstream.call(job.payload)
+                async with self._sem:  # wait for a slot outside the clock
+                    return await asyncio.wait_for(self._upstream.call(job.payload), self._policy.attempt_timeout_s)
 
             reply = await retry_async(attempt, self._policy, op=f"job-{job.job_id}")
             digest: str | None = None
@@ -217,14 +219,22 @@ class WorkerPool:
             try:
                 if job is None:
                     return
-                self.results.append(await self._process(job))
+                try:
+                    self.results.append(await self._process(job))
+                except asyncio.CancelledError:  # drain deadline hit while this job was in flight
+                    self.results.append(JobResult(job_id=job.job_id, status=JobStatus.DROPPED))
+                    raise
+                except Exception as exc:  # one poison job must not kill the worker
+                    log.error("job crashed", extra={"ctx": {"job_id": job.job_id, "error": repr(exc)}})
+                    self.results.append(JobResult(job_id=job.job_id, status=JobStatus.FAILED, attempts_note=type(exc).__name__))
             finally:
                 self._queue.task_done()
 
     async def drain(self, timeout_s: float) -> int:
-        """Stop intake, finish queued work within timeout, mark leftovers DROPPED. Returns dropped count."""
+        """Stop intake, finish work within ONE deadline (queued, in-flight, worker exit); the rest is DROPPED. Returns dropped count."""
         self._closing = True
         dropped = 0
+        deadline = time.monotonic() + timeout_s
         try:
             await asyncio.wait_for(self._queue.join(), timeout=timeout_s)
         except asyncio.TimeoutError:
@@ -235,9 +245,12 @@ class WorkerPool:
                     dropped += 1
                     self.results.append(JobResult(job_id=job.job_id, status=JobStatus.DROPPED))
         for _ in self._tasks:
-            await self._queue.put(None)
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        return dropped
+            self._queue.put_nowait(None)
+        _, pending = await asyncio.wait(self._tasks, timeout=max(0.0, deadline - time.monotonic()))
+        for task in pending:  # in-flight past the deadline: cancel, the worker records DROPPED
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        return dropped + len(pending)
 
 
 def install_signal_handlers(loop: asyncio.AbstractEventLoop, stop: asyncio.Event) -> None:

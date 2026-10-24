@@ -19,7 +19,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class JsonFormatter(logging.Formatter):
@@ -74,6 +74,12 @@ class Severity(str, Enum):
 class Check(BaseModel):
     type: Literal["presence", "max_hours", "max_months", "min_frequency_months"]
     param: float | None = None
+
+    @model_validator(mode="after")
+    def _param_required(self) -> "Check":
+        if self.type != "presence" and self.param is None:
+            raise ValueError(f"check type {self.type!r} requires param")
+        return self
 
 
 class Requirement(BaseModel):
@@ -211,9 +217,12 @@ class SkepticVerifier:
 VETO_VERIFIERS = {"quantitative"}  # deterministic, code-based checks: their NON_COMPLIANT cannot be outvoted by lexical votes
 
 
+MIN_LIVE_VOTES = 2  # quorum: one surviving lexical vote must never auto-accept a finding
+
+
 def consensus(votes: list[Vote]) -> tuple[Verdict, float]:
     live = [v for v in votes if v.verdict is not None]
-    if not live:
+    if len(live) < MIN_LIVE_VOTES:
         return Verdict.INSUFFICIENT, 0.0
     vetoes = [v for v in live if v.verifier in VETO_VERIFIERS and v.verdict is Verdict.NON_COMPLIANT]
     if vetoes:

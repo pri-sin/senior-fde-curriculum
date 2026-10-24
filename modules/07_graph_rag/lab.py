@@ -88,7 +88,7 @@ def validate_ontology(t: Triple) -> Triple:
     return t
 
 
-LEGAL_SUFFIX = re.compile(r"\b(inc|corp|corporation|co|ltd|llc|plc|gmbh|sa)\b\.?", re.I)
+LEGAL_SUFFIX = re.compile(r"\b(inc|incorporated|corp|corporation|co|company|ltd|limited|llc|llp|lp|plc|gmbh|ag|sa|bv|nv|pty)\b\.?", re.I)
 
 
 def normalize(name: str) -> str:
@@ -99,14 +99,17 @@ def normalize(name: str) -> str:
 class EntityResolver:
     """Alias table + normalization. Real systems add blocking and fuzzy scoring with human review."""
 
-    def __init__(self, aliases: dict[str, str] | None = None) -> None:
+    def __init__(self, tenant: str, aliases: dict[str, str] | None = None) -> None:
+        if not tenant:
+            raise GraphError("tenant is required: node ids are tenant-scoped")
+        self.tenant = tenant
         self._alias = {normalize(k): v for k, v in (aliases or {}).items()}
         self._seen: dict[str, str] = {}
 
     def resolve(self, e: Entity) -> str:
         key = normalize(e.name)
         canon = self._alias.get(key, key)
-        node_id = f"{e.type}:{canon}"
+        node_id = f"{self.tenant}|{e.type}:{canon}"  # tenant prefix: the same name under two tenants is two nodes
         self._seen.setdefault(node_id, e.name)
         return node_id
 
@@ -143,6 +146,8 @@ class InMemoryGraph:
             self._fails -= 1
             raise GraphTimeout("transaction timed out")
         seed, depth, limit = str(params["seed"]), int(params["depth"]), int(params["limit"])  # type: ignore[call-overload]
+        if not seed.startswith(f"{params['tenant']}|"):  # fail closed: a seed outside the caller's tenant is never traversed
+            raise GraphError("seed is outside the caller's tenant")
         out: list[dict[str, object]] = []
         queue: deque[tuple[str, list[Edge]]] = deque([(seed, [])])
         seen = {seed}
@@ -177,7 +182,8 @@ class CypherPlanner:
         depth, limit = min(depth, self.MAX_DEPTH), min(limit, self.MAX_LIMIT)
         rels = "|".join(rel_types)
         cypher = (f"MATCH p = (s {{id: $seed, tenant: $tenant}})-[:{rels}*1..{depth}]->(e) "
-                  "RETURN e.id AS end, e.name AS end_name, [r IN relationships(p) | type(r)] AS rels LIMIT $limit")
+                  "RETURN e.id AS end, e.name AS end_name, [r IN relationships(p) | type(r)] AS rels, "
+                  "[r IN relationships(p) | r.evidence] AS evidence LIMIT $limit")
         return cypher, {"seed": seed_id, "tenant": tenant, "depth": depth, "limit": limit}
 
 
@@ -225,7 +231,7 @@ class ScriptedExtractor:
 
 
 async def ingest(doc: str, store: GraphStore, tenant: str, min_conf: float = 0.6) -> dict[str, int]:
-    resolver = EntityResolver()
+    resolver = EntityResolver(tenant)
     nodes: dict[str, str] = {}
     edges: list[Edge] = []
     stats = {"accepted": 0, "low_confidence": 0, "ontology_violations": 0}
@@ -254,7 +260,7 @@ async def main() -> None:
     log.info("ingested", extra={"ctx": {**stats, "nodes": len(store.nodes)}})
 
     planner = CypherPlanner()
-    cypher, params = planner.plan("Company:acme", ["OWNS", "SUPPLIES", "SANCTIONED_BY"], depth=5, limit=500, tenant="t1")
+    cypher, params = planner.plan("t1|Company:acme", ["OWNS", "SUPPLIES", "SANCTIONED_BY"], depth=5, limit=500, tenant="t1")
     log.info("planned", extra={"ctx": {"cypher": cypher, "params": params}})
     rows = await read_with_retry(store, cypher, params)
     for r in rows:
