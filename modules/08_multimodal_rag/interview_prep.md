@@ -41,3 +41,21 @@
 *Impact.* "One claim was overpaid by twice the credit amount, $2,408, and the incident undermined your team's confidence, which is the harder thing to repair. I'd rather you keep a healthy skepticism than trust us blindly."
 
 *Remedy.* "Three controls, effective this week. First, the parser now treats parenthesized values as negatives, with a regression test built from this exact document and thirty other format variants your adjusters have seen. Second, every estimate table has to reconcile: line items must sum to the stated total, and any mismatch blocks the field and routes it to a person, with the source image crop beside the value. That check would have caught this claim. Third, we'll measure monetary-field accuracy weekly against a sample your team keys by hand and report it to you; if it falls below ninety-nine percent we pause automatic payment recommendations for that document type. Manual keying isn't free of error either, so I'd like us to compare error rates on the same hundred claims before deciding."
+
+
+# Extension Practice
+
+**1. Patch-index storage.** A ColPali-style index keeps 1,024 patch vectors of 128 dimensions per page, int8 (1 byte per dimension). How big is 1 million pages, and how do you cut it?
+*Answer.* 1,024 x 128 = 131,072 bytes = 128 KiB per page, so 1 M pages is about 131 GB of vectors before index overhead. Cuts: index only visual document classes (slides, diagrams), keep a text index for the rest, binarize vectors (1 bit per dimension is 16 KiB per page, 8x smaller), and merge or prune near-blank patches (margins and whitespace are often a third of a page).
+
+**2. InfoNCE sanity check.** Batch of 256 pairs, untrained model. What loss do you expect, and what does a larger batch change?
+*Answer.* Chance level is ln 256 = 5.55, because each image must pick its caption among 256 candidates. A batch of 32,768 has chance level ln 32768 = 10.4: the task is harder (more negatives), so each step gives a stronger training signal. If the loss at step 0 is far below ln N, suspect leakage (for example the same caption used for many images in a batch); if it never gets below ln N, suspect misaligned pairs.
+
+**3. Image token budget.** A 3000 x 2000 photo is sent at full size, and a 12-page packet is sent as page images at 1275 x 1650. Estimate tokens using the lab's heuristic.
+*Answer.* The photo is downscaled so the long edge is 1,568 px, giving 1568 x 1045, and 1568 x 1045 / 750 = about 2,184 tokens, so uploading the 6 MP original only adds bytes and latency, not tokens or detail. Each page is about 2,533 tokens, so the packet is about 30,400 tokens. If the budget is 8,000 image tokens, select 3 pages (relevance plus neighbours) instead of sending all 12.
+
+**4. Region assignment metric.** A layout model predicts a table box (0, 0, 10, 10); the true box is (5, 0, 15, 10). Compute IoU and containment, and say which one decides word assignment.
+*Answer.* Intersection = 5 x 10 = 50, union = 100 + 100 - 50 = 150, so IoU = 0.33. Containment of the predicted box in the truth is 50 / 100 = 0.5. IoU is the right metric for scoring the layout model (it penalizes size errors both ways); containment is the right test for deciding whether a given word belongs to a region (word area inside region / word area).
+
+**5. Why deskew matters.** A 1,200 px wide scan is skewed by 2 degrees. What happens to line grouping with a 6 px tolerance?
+*Answer.* The right edge sits 1200 x tan(2 degrees) = about 42 px lower than the left edge, which is several line heights, so words from one printed line land on different "lines" and table cells shift into neighbouring rows. That is the war-story failure mode in this module. Fix upstream: estimate skew (projection profile, usually within 0.5 degrees), rotate, then group lines; flag pages with skew above about 5 degrees for review.

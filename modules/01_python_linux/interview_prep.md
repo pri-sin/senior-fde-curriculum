@@ -38,3 +38,21 @@
 *Impact.* "The business impact is concrete: 3,000 records were not enriched on time, which delayed the morning compliance report for those accounts. The more important point is the risk it exposed, that any deploy could repeat it, and I understand why that makes a rewrite sound attractive."
 
 *Remedy.* "Three changes, all in place by Friday, with evidence you can inspect. First, we commit offsets only after the write succeeds, so a killed pod means redelivery, never loss. Second, the drain window is now 45 seconds, matched to the worst-case call, and we test it in your staging cluster by killing pods mid-batch during a load test. Third, we've added loop-lag and in-flight gauges to your Grafana so you can see health yourself. A rewrite would cost roughly two quarters and would not by itself change any of those three controls; the same gap could appear in Java. If after the load test you still want to evaluate Java, I'll support a time-boxed comparison on the same acceptance criteria."
+
+
+# Extension Practice
+
+**1. You run 4 CPU-bound hashing jobs of 0.1 s each in a ThreadPoolExecutor with 4 threads. How long, and what changes with a ProcessPoolExecutor on 4 cores?**
+Threads: about 0.4 s (the GIL serialises pure-Python CPU work, so no speedup over sequential). Processes: about 0.1 s of compute plus start-up and pickling overhead, so worthwhile only when each task is much longer than a few milliseconds. For 6 blocking calls of 50 ms, threads take about 50 ms instead of 300 ms, because waiting releases the GIL.
+
+**2. A config file is corrupted after a node crash. Why, and what is the fix?**
+The service wrote in place; a crash mid-write left half a file. Write to a temp file in the same directory, `fsync`, then `os.replace` (atomic rename on one filesystem). Readers see either the old or the new file.
+
+**3. A pod exits with code 137 while another exits 143. Explain.**
+137 = 128 + 9 (SIGKILL), typically the kernel OOM killer or a grace period that expired. 143 = 128 + 15 (SIGTERM) handled and exited normally. Python's subprocess reports these as -9 and -15. Fix 137 with bounded queues, a memory limit that matches the working set, and a drain timeout shorter than `terminationGracePeriodSeconds`.
+
+**4. Why does `ExceptionGroup` exist, and what does `except*` do?**
+Concurrent tasks can fail at the same time (for example `asyncio.TaskGroup`). The group carries all failures; `except* ValueError` handles the matching members and lets the rest propagate. Sibling tasks are cancelled when the first fails.
+
+**5. How do you prevent a leaked secret from environment config?**
+Declare it `SecretStr`, never log the raw environment, report only field names in validation errors, pass child processes a minimal explicit `env`, and avoid putting secrets in argv (visible in `ps`). Fail fast at start-up if a required variable is missing.

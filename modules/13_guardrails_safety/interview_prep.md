@@ -42,3 +42,21 @@
 *Impact.* "In this test the hidden instruction changed the assistant's summary, which is a real integrity problem. The reason I'm not alarmed about data loss is that the assistant in your deployment has no tool that can send data out. But I understand that 'it only changed a summary' is a thin comfort if employees rely on those summaries."
 
 *Remedy.* "So we're strengthening the design in three ways, and you'll be able to verify each. Content from documents is now marked as data and scanned for hostile instructions before the model sees it, and anything suspicious is shown to the employee with a warning. The assistant's powers stay minimal: it can read, and anything that writes or sends goes through a confirmation screen showing exactly what will happen. And your red team's PDF, along with the fifty variants we'll generate from it, becomes a permanent regression test that runs on every release. I'd invite your team to keep attacking it. I'd rather find the next bypass in a test than in production, and I'll report the block rate and every bypass to you each week."
+
+
+# Extension Practice
+
+**1. Your PII recognizer flags 1 in 10 benign documents. Walk through the fix.**
+Measure first: label a corpus, compute precision, recall and document-level false-positive rate per entity type, then sweep the score threshold. Typical fixes in order: add validators (Luhn for cards, mod-97 for IBAN) so part numbers die, lower base scores for ambiguous patterns and boost with context words, allowlist known formats, then re-measure. In the lab, the naive regex baseline flags 7 of 10 benign texts; validators plus context cut that to 1 of 10 (a 16-digit id that satisfies Luhn). Raising the threshold from 0.5 to 0.9 drops micro recall from 0.94 to 0.50, so thresholds trade recall for precision per entity, not globally.
+
+**2. Why is reversible masking dangerous, and what controls make it acceptable?**
+It turns a one-way redaction into a lookup that an attacker or a buggy service could call. Controls: mapping stored server-side per request id with a TTL, tokens that are keyed hashes under a per-request key (no information, no cross-request linkage), restore only for the owner who holds an explicit scope, never-restore entity types (cards, SSNs), audit of every restore without values, and never re-sending restored text to the model. Test the denials: wrong user, missing scope, wrong request, expired record, forged token.
+
+**3. A crescendo attack keeps each message under the block threshold. How do you catch it?**
+Accumulate risk per conversation with decay: risk = previous x 0.7 + turn score. Turns scoring 0.35, 0.40, 0.35, 0.40 give 0.35, 0.645, 0.801, 0.961, so a 0.85 session threshold blocks at turn 4 even though no single turn reached 0.6. Tune the decay so ordinary conversations (mostly zero scores) never accumulate.
+
+**4. Design the CI gate for guardrails.**
+Keep a versioned attack corpus tagged by category (override, role-play, encoding, multilingual, payload splitting, many-shot, hypothetical, prompt extraction) plus benign controls. Per rail, compute block rate per category and false-positive rate. Fail the build if any category drops below a floor (the lab uses 0.75), the overall block rate drops below 0.85, or false positives exceed 12%. Publish the failures list so a new bypass becomes a new corpus entry. Know the limits: a corpus measures known attacks only, and the lab's corpus ships with three deliberate bypasses to remind you of that.
+
+**5. Fail open or fail closed?**
+Decide per rail by the cost of being wrong. A PII or injection rail that errors should fail closed (block, tell the user to retry). A cosmetic rail (link rewriting) can fail open with an alert. Always give each rail a timeout, so a slow dependency cannot hold the request path hostage, and log the failure mode taken. For 60 QPS and a 250 ms rail timeout, a hung rail ties up at most 60 x 0.25 = 15 requests at a time.

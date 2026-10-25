@@ -41,3 +41,21 @@
 *Impact.* "Eight percent of your contracts carried a different governing-law value for several weeks. Anyone who relied on that field for risk routing could have made a decision on incorrect data, and that is exactly the kind of silent change an architect should not have to tolerate."
 
 *Remedy.* "We're making three commitments. We now pin an exact model version, so nothing changes unless we change it. Every model or prompt change must pass a golden set of 500 of your own contracts, field by field, and we block the release if any field drops by more than one point. And you will see a change log before any change reaches your tenant, with the evaluation results attached. For the 8% already affected, we'll re-run them under the pinned model this week and send you a diff report so your team can decide which downstream records to correct."
+
+
+# Extension Practice
+
+**1. Price a request.** 10,000 input tokens, 500 output tokens, illustrative prices of $3 and $15 per million tokens. What does it cost, and what if 9,000 input tokens are served from a cache priced at $0.30 per million?
+*Answer:* uncached = 10,000 x 3/1e6 + 500 x 15/1e6 = $0.03 + $0.0075 = **$0.0375**. Cached = 1,000 x 3/1e6 + 9,000 x 0.30/1e6 + $0.0075 = $0.003 + $0.0027 + $0.0075 = **$0.0132**, about 65% cheaper. Say the prices are placeholders and name where you would read real ones.
+
+**2. Size a sliding window.** Budget 8,000 tokens, 1,000 reserved for output, system prompt 500, average turn (user + assistant) 700. How many turns fit, and what must never be split?
+*Answer:* (8,000 - 1,000 - 500) / 700 = 9.3, so **9 turns**. Never split an assistant tool call from its tool result, and never drop the system prompt. If the oldest turns matter, add a running summary (compression) instead of widening the window.
+
+**3. Parallel tools and timeouts.** Three independent tools take 400 ms, 900 ms and 250 ms. Latency sequential vs parallel, and with a 500 ms per-tool timeout?
+*Answer:* sequential 1,550 ms; parallel `asyncio.gather` ~**900 ms** (the slowest); with a 500 ms timeout the 900 ms tool returns an error result and total latency is ~**500 ms**. Results must keep their call ids because completion order is not request order.
+
+**4. The model calls `get_weathr`.** What do you do and why must you still answer that call id?
+*Answer:* do not execute; return an error tool result ("Unknown tool, available: ..., did you mean get_weather?") with the same id. Providers reject a follow-up request when a requested id has no result. Cap tool rounds (say 5), reject identical repeated calls, and alert on cap hits.
+
+**5. Why a discriminator?** A union of three action models receives `{"kind": "fax", ...}`. Compare the error with and without `Field(discriminator="kind")`.
+*Answer:* without it the model tries all three members and returns up to three error groups, mostly noise that bloats the repair prompt. With it you get one error ("tag 'fax' does not match expected tags 'email', 'call', 'meeting'"), the repair call is shorter and succeeds more often, and valid payloads validate faster because only one branch is tried.

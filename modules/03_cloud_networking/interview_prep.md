@@ -38,3 +38,23 @@
 *Impact.* "If we got this wrong the exposure would be patient data, a reportable HIPAA incident, and loss of trust across all of your subsidiaries. That is the standard we are designing to, and it's why isolation has to be true by construction, not by promises."
 
 *Remedy.* "Here is what we'll do instead. The vendor model endpoint is exposed to you through PrivateLink: one-way, a single network interface in your VPC, no route table entries into the vendor's network and none from it into yours. The vendor cannot initiate a connection to you at all. Your hospitals stay on separate route tables with no path between them, and I'll prove that with an automated reachability test that fails the deployment if any hospital can reach another. Credentials are short-lived and only valid from your endpoint ID, so a stolen token is useless elsewhere. I'll walk your network team through the route tables and the test output live this week, and your CISO's team can run the analyzer themselves."
+
+# Extension Practice
+
+**1. Lifecycle arithmetic.** Rule on `logs/`: `STANDARD_IA` at day 30, `GLACIER` at day 90, expire at day 365. Where are objects aged 10, 45, 120 and 400 days? Would expiring at day 100 instead be a good idea?
+*Answer:* 10 days stays `STANDARD`, 45 is `STANDARD_IA`, 120 is `GLACIER`, 400 is expired. Expiring at 100 leaves only 10 days in Glacier against a 90-day billed minimum, so you pay for 80 days you did not use (early-deletion charge). Expire at 180 or later, or skip the Glacier step.
+
+**2. Subnet sizing and NAT count.** A VPC spans 3 AZs with public, app and data tiers. How many NAT gateways for AZ-resilient egress, and how many usable IPs in a `/24` and a `/28`?
+*Answer:* 3 NAT gateways, one per AZ, each in that AZ's public subnet, with each app subnet routing to its own AZ's NAT. A `/24` has 256 - 5 = 251 usable addresses; a `/28` has 16 - 5 = 11. The data tier has no default route, so it is isolated.
+
+**3. Why can't the private instance reach the internet?** Its route table has `0.0.0.0/0` to `nat-a`, but `nat-a` was created in `app-a`. Diagnose it.
+*Answer:* A NAT gateway must sit in a public subnet (one whose route table sends `0.0.0.0/0` to an internet gateway). In a private subnet the translated packets have nowhere to go. Move the NAT to `public-a`, point the private route table at it, and confirm with a path check (`egress_path` in the lab).
+
+**4. Budget alerts.** Limit $1,000. Spend is $323 on day 4, $565 on day 7, $808 on day 10, $1,050 on day 13 of a 31-day month. Which alerts fire, and when?
+*Answer:* Day 4: forecast is 323 / 4 x 31 = $2,503, above 100% of the limit, so the FORECASTED 100% alert fires first. Day 7: actual passes 50%. Day 10: actual passes 80%. Day 13: actual passes 100%. Each alert fires once. The forecast alert is the early warning; the actual alerts are confirmation.
+
+**5. Tighten a role.** A role is granted `s3:*`, `sqs:*` and `iam:PassRole` on `*`, but CloudTrail shows 3 distinct calls in 90 days (`s3:GetObject`, `s3:ListBucket`, `sqs:SendMessage`). How much of the grant is unused, and what must you check before swapping the policy?
+*Answer:* The catalog expansion grants 13 actions and 3 are used: 10 unused, a 77% reduction. Check that every observed call still succeeds under the new policy (regression), that nothing new opens up (escalation), that rare jobs (quarterly, disaster recovery) are not missing from a 90-day window, and keep the explicit Deny guardrails. Remove `iam:PassRole` on `*` regardless of usage.
+
+**6. Cross-account failure triage.** Account B's role calls `sts:AssumeRole` on account A's role and gets AccessDenied. Name the four things to check, in order.
+*Answer:* (1) A's trust policy names B's account or role as principal. (2) Trust conditions: external ID, MFA, source IP, organization ID all satisfied. (3) B's caller identity policy allows `sts:AssumeRole` on A's role ARN (cross-account needs both sides). (4) Session limits: requested duration is within the role's maximum, and at most 3,600 seconds when role-chained.

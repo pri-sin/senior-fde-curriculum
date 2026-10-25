@@ -42,3 +42,21 @@
 *Impact.* "That one change accounts for roughly 60 of the 80 thousand dollar increase, and it didn't improve answer quality, our tests show the same accuracy with a quarter of the history. So most of the added spend bought you nothing, and I understand why that reads as a program that isn't under control."
 
 *Remedy.* "We're changing three things, and you will see them in your own reports. Every team gets a monthly budget enforced at the gateway, so a runaway change stops at the cap instead of reaching your invoice. Every request carries its cost, so your finance team can see spend by team and by application each week, and an alert fires when any application's cost per request jumps by more than twenty percent. Finally, every prompt or model change must pass our quality test set and shows its cost impact before release, so you always know what you pay for each point of accuracy. With caching and routing easy questions to a smaller model, I expect to bring the bill under 90 thousand dollars a month without reducing quality, and I'll bring the measured result to our next review rather than a forecast."
+
+
+# Extension Practice
+
+**1. A provider recovers from a 1-second outage and 300 clients retry at once. What backoff do you choose and why?**
+Full or decorrelated jitter with a cap, plus a max attempt count and deadline. In the lab simulation (300 clients, service admits 20 calls per 0.1 s = 200/s after recovery, so the best possible drain time is 300 / 200 = 1.5 s), capped exponential without jitter peaks at 140 attempts per 0.1 s bucket after recovery, averages 8.0 attempts per client, and leaves 13% of clients failed after ten attempts with p95 completion 9.2 s. Full jitter peaks at 56, averages 7.1 attempts, 100% succeed, p95 2.7 s. Jitter works because it desynchronizes clients, not because it waits longer.
+
+**2. Size the idempotency store for write tools at 50 requests/s with a 24 h TTL, and explain what happens if the response is lost.**
+50 x 86,400 = 4.32 M keys; at roughly 300 B each (key, payload hash, stored result) that is about 1.3 GB, comfortable in Redis. If the response is lost after the side effect, the client retries with the same key: the store replays the stored result, and the downstream call carries the same key so it does not repeat the action. A reused key with a different payload must fail loudly, never replay. Failed executions are not cached, so a retry can run again.
+
+**3. Which rate limiter would you pick for a per-tenant limit of 600 requests/minute across 10,000 tenants?**
+Sliding window counter or token bucket. A sliding log stores up to 600 timestamps per tenant: 10,000 x 600 x 8 B = 48 MB, exact but heavy. A counter needs two numbers per tenant, about 160 KB. A fixed window admits up to 2x the limit across a boundary (the lab shows 20 admitted for a limit of 10). Use the token bucket when bursts are acceptable and for tokens-per-minute limits (`cost` = token count); add a concurrency cap for streaming.
+
+**4. Your LLM judge prefers whichever answer comes first. How do you measure and mitigate it, and what does it cost?**
+Judge each pair in both orders. In the lab, a judge with a first-position bonus drops kappa against human labels from 0.66 to 0.42, and only 50% of verdicts survive the swap; on the surviving pairs kappa is 0.75, and the rest go to a human or a third judge. Cost: swapping doubles judge calls. For 18,000 cases at 2.5k tokens per call, one pairwise comparison with swap is 18,000 x 2 x 2,500 = 90 M tokens, about $400 at the ~$4.4 per million blended rate implied by the crucible ($600 for 135 M tokens).
+
+**5. How do you decide whether prompt v2 really regressed on a 17-case benchmark, and how large should the benchmark be?**
+Use a paired bootstrap on per-case differences. The lab's v2 shows faithfulness 1.00 to 0.735 (delta -0.265, 95% interval -0.38 to -0.15): a real regression, so block the release. Another run with answer-relevancy delta -0.059 and interval -0.18 to 0.00 is "no significant change" despite a visible drop, which is what small samples do to you. To detect a 0.05 shift when per-case standard deviation of the difference is about 0.3, you need roughly (1.96 x 0.3 / 0.05)^2 = 138 paired cases, so grow the benchmark with synthetic questions plus sampled production traces.

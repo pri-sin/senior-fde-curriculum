@@ -42,3 +42,21 @@
 *Impact.* "The transfer exceeded your own ten-thousand-dollar human-review threshold, and it should never have been eligible for automatic approval in the first place. That is a policy gap as well as a model error, and it is the part the regulator will care about most."
 
 *Remedy.* "We're fixing both layers. First, the panel will use independent models and different evidence: one voter is a deterministic sanctions screening engine with fuzzy transliteration matching, which does not share failure modes with a language model. Second, the amount and irreversibility rules move out of the prompts into a versioned policy engine, so anything over ten thousand dollars always goes to a named human, whatever the agents say. Third, I'll give your compliance team a full decision trace for this transfer today, covering each agent's vote, the policy rule that should have fired, and a replay of the last ninety days to find any similar near-misses, so you can tell the regulator what you found and what changed."
+
+
+# Extension Practice
+
+**1. An agent loop runs 25 steps at about 2,000 tokens each before a hard cap hits. Cost per stuck run, and what does a detector save?**
+25 x 2,000 = 50,000 tokens; at a blended $3 per million tokens = $0.15 per stuck run. The cost that matters is volume: 10,000 stuck runs/day = $1,500/day. A repeated-signature detector (3 identical steps) stops at step 3, a reduction of about 88%, and the case reaches a human with the trace.
+
+**2. Memory half-life is 30 days. What recency weight does a 90-day-old memory get, and would a low-importance one be forgotten?**
+0.5 ** (90 / 30) = 0.125. With retention = 0.5 x importance + 0.5 x recency and a 0.25 threshold: importance 0.1 gives 0.05 + 0.0625 = 0.1125 (forgotten); importance 0.9 gives 0.45 + 0.0625 = 0.5125 (kept).
+
+**3. A looping agent calls a read tool 5 times per second; the gateway allows 30 per minute per agent per tool. What happens, and why not just retry on the rate-limit error?**
+5/s = 300 calls/min, so about 90% are rejected after the first 30 (10x reduction in upstream load) and each rejection carries a retry-after. Blind retries re-create the storm; the agent loop must treat the error as an observation, and the loop detector should fire first.
+
+**4. Self-correction allows 3 rounds with a separate critic. How many model calls and how much does it cost versus one shot?**
+1 generation + 3 critiques + 2 reflections = 6 calls, about 6x the tokens of one shot (9,000 vs 1,500 tokens at 1,500 each). Use a cheap model for critique, stop early when the score plateaus, and measure whether quality gains justify the multiple.
+
+**5. Why use a protocol such as MCP for tool access, in numbers? How do you stop one server from affecting another?**
+Without a shared protocol, N hosts and M tool providers need N x M custom integrations (5 x 8 = 40); with one, N + M adapters (13). Isolation comes from the 1:1 client-to-server sessions, host-side policy (allowlist, consent for non-read-only tools), per-tool scopes, and a pinned manifest digest so a changed tool definition is noticed.

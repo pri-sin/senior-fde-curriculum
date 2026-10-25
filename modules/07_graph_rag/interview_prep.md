@@ -40,3 +40,21 @@
 *Impact.* "Answering that took your analysts about two days by hand, across three systems. If the answer is late or incomplete, you either halt shipments unnecessarily or miss real exposure, and both have a measurable cost."
 
 *Remedy.* "So I'd propose a narrow scope rather than a big platform. We model only four entity types and four relationships, the ones needed for that question. We load them from data you already have, supplier master, bill of materials and the sanctions feed, and keep vector search for everything else. Success has a hard test: the exposure question answered in under three seconds, with a source for every link, on a hundred historical cases your analysts already solved by hand. If we don't match them, we stop after six weeks and you've spent a fraction of what a platform build would cost. If we do, you'll have seen the value before committing to the ontology work."
+
+
+# Extension Practice
+
+**1. Join order arithmetic.** Customers 300, orders 1,500, products 50, each order has about 2 products. Query: customers who ordered SKU-007. Compare anchors.
+*Answer.* From the customer end: 300 starting nodes, 300 x 5 = 1,500 order visits, 1,500 x 2 = 3,000 product visits, roughly 4,800 rows touched. From the product end with an index on `sku`: 1 start node, about 60 orders (1,500 x 2 / 50), then 60 customer hops, roughly 120. That is about 40x less work, for the cost of one `CREATE INDEX`. The lab prints measured numbers for the same shape (about 27x with its sample data).
+
+**2. Taxonomy or ontology?** Product catalog browsing and a rule "a facility cannot own a company" in the same system: which structure does each need?
+*Answer.* Browsing and faceting need a taxonomy (single-parent tree, cheap ancestor queries). The ownership rule needs an ontology: a relation `OWNS` with domain Organization and range Facility rejects the bad triple at ingest. Keep both: the taxonomy as a `subClassOf`-style hierarchy inside the ontology, so there is one source of truth.
+
+**3. Idempotent relational load.** A nightly sqlite/Postgres to Neo4j load runs twice after a retry. What must be true so nothing is duplicated, and how do you prove it?
+*Answer.* Every node write is `MERGE (n:Label {id: $id}) SET n += $props` backed by a uniqueness constraint, every relationship is `MERGE` between matched endpoints, and join-table rows merge on (type, src, dst). Proof: run the load twice and assert node and relationship counts are equal (the lab does exactly this). Add a constraint so a bug cannot silently create a duplicate.
+
+**4. Recency decay.** With a 30-day half-life, how much does a purchase 400 days old weigh against one made today, and why does it matter?
+*Answer.* 0.5 ^ (400 / 30) = about 0.0001 (roughly 1/10,000), so a user's stale history cannot dominate "also bought" results and old purchases stop steering recommendations. Pick the half-life per domain (days for news, months for appliances) and tune it against held-out click data.
+
+**5. Closed hub.** Hub FRA closes. Shipment S-101 normally takes 14 h via FRA, and the best detour is 36 h with an SLA of 20 h. What do you tell operations?
+*Answer.* Delay is 22 h and the SLA is breached by 16 h, so S-101 is flagged for expedite or customer notice, while S-100 (15 h to 20 h, SLA 24 h) is merely delayed 5 h. Rank exposed shipments by value and SLA breach, and list unreachable hubs too: a hub with a single lane (a spur) is stranded when its neighbor fails.

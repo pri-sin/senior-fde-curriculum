@@ -41,3 +41,21 @@
 *Impact.* "Four thousand dollars is the visible cost. The less visible one is that the customer's ticket was never answered, so you paid and got nothing."
 
 *Remedy.* "Three controls, all already designed into the graph model we're moving to. First, a hard limit of twenty-five steps per conversation, after which the case goes to a human with everything the agent did so far. Second, a token budget per conversation, so a runaway is capped at about two dollars, not four thousand. Third, a stall detector: if the reviewer gives the same feedback twice, the loop stops and escalates, because repeating the same instruction is not progress. I'll show you the replay of last Tuesday's ticket under the new limits in the next review, so you can see it stop at step twelve."
+
+
+# Extension Practice
+
+**1. Two parallel branches both write `summary`. What should the framework do, and what do you change?**
+Raise, do not pick a winner: last-finisher-wins makes results depend on timing. Fix by giving the field a reducer (append and merge later), or by making one node the single writer (a synthesize node after the join). In the lab, `StateConflictError` names the field and the writers.
+
+**2. Fan-out of 3 branches at 2.0 s, 2.5 s and 3.0 s each. Latency serial versus concurrent? What if the third has a 2.8 s timeout?**
+Serial = 7.5 s; concurrent = max = 3.0 s. With a 2.8 s timeout the run fails at 2.8 s (the slowest branch is cut off), so decide per branch whether a timeout is fatal or whether you merge partial results and mark the field degraded.
+
+**3. Map-reduce over 1,000 documents, 40 ms per summary, concurrency limit 20. Wall time and what is the risk of raising the limit to 200?**
+Serial = 1,000 x 40 ms = 40 s. At limit 20: 1,000 / 20 = 50 waves x 40 ms = about 2 s; at limit 200: about 0.2 s. The limit is protecting the provider: 200 concurrent calls can hit rate limits (429s), which retries then amplify. Raise it only with backoff and a provider quota that supports it.
+
+**4. ReAct versus Plan-and-Execute for a 6-step data pull where steps are known in advance. Which, and roughly why?**
+Plan-and-Execute: 1 planning call + 6 cheap tool executions, versus ReAct re-reading a growing transcript on all 6 steps (transcript cost grows roughly quadratically in steps). Keep a replanner for failures. Choose ReAct when each step depends on what the previous one revealed.
+
+**5. Your compiled graph passes, yet a prod run spins until the recursion limit. What did compile-time validation miss?**
+Static checks prove a path to END exists, not that the router ever takes it. Add a runtime guard (recursion limit, token budget, repeated-state detection) and test the router on adversarial states.

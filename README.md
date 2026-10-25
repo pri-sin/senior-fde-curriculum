@@ -10,6 +10,10 @@ Each module in `modules/<NN_name>/` contains exactly three files:
 | `lab.py` | Runnable Python 3.11+ reference implementation (Pydantic v2, asyncio, JSON logs, backoff retries, typed errors) |
 | `interview_prep.md` | A system-design "crucible" with sizing math, plus a word-for-word client simulation |
 
+## Syllabus coverage
+
+`COVERAGE.md` maps all 198 topics of the AI Forward Deployed Engineer Bootcamp syllabus (krishnaik.in) to the file and section or function where each is taught. Every module README repeats its own table and adds concept notes, and every `lab.py` ends with an `extension_demo()` that exercises the added topics.
+
 ## Read it as a web page
 
 `docs/index.html` is a single-file reader for all 16 modules (concepts, system design prep and lab code, with a module index and light/dark themes). Open it in a browser, or turn on GitHub Pages for the `main` branch with the `/docs` folder to host it. It loads `marked` and `mermaid` from CDNs, so it needs an internet connection. The architecture diagrams in each module README are Mermaid flowcharts, which GitHub also renders natively. It is generated from the module files, so regenerate it after editing any of them.
@@ -30,7 +34,7 @@ pip install -r requirements.txt
 python3 modules/01_python_linux/lab.py
 ```
 
-Labs are self-contained and run offline: external systems (LLMs, Neo4j, ERP, vector DBs) are replaced by deterministic in-process adapters behind the same interfaces you would use in production, so swapping in the real client is a one-class change. Where a lab is described as an adapter, the adapter's protocol is the learning target.
+Labs are self-contained and run offline (each prints JSON logs and exits 0; they are now 1,000 to 2,500 lines each): external systems (LLMs, Neo4j, ERP, vector DBs) are replaced by deterministic in-process adapters behind the same interfaces you would use in production, so swapping in the real client is a one-class change. Where a lab is described as an adapter, the adapter's protocol is the learning target.
 
 Known limits of the offline stand-ins: the hashed "embeddings" in Modules 06, 08 and 12 reproduce the interfaces and scoring math (cosine, MaxSim) but not real semantic similarity, so paraphrase queries will not match as they would with a trained model; the lexical RAGAS-style metrics in Module 14 are deterministic proxies for LLM-judged ones; Module 12 verifies HS256 tokens where production would use RS256/ES256 with JWKS and a vetted JWT library.
 

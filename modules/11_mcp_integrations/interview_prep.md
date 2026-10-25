@@ -41,3 +41,16 @@
 *Impact.* "If this lock-up happened again during close, the cost isn't only six hours of your team's time, it's finance reporting deadlines and the credibility of the whole AI program."
 
 *Remedy.* "So the design starts from your system's limits, not the AI's appetite. First, every call goes through a gateway that caps SAP traffic at eight calls a second and six at a time, numbers your Basis team sets and can change, far below your tested capacity. Second, if SAP slows or errors, a circuit breaker stops sending traffic within seconds and the agent tells the user it's unavailable, so we back off rather than pile on. Third, there's a month-end freeze switch your team controls that turns the integration read-only from cache. And everything is read-only for the first quarter: the agent can look things up, but any change is a proposal a person approves. I'll run a load test against your quality system with a deliberately misbehaving agent, with your Basis team watching their dashboards, before we touch production."
+
+
+# Extension Practice
+
+**1. Webhook dedupe sizing.** Your Slack app receives 50 events/s at peak and you keep event ids for 1 hour. How much memory, and why not longer? *Answer:* 50 x 3,600 = 180,000 ids x ~100 B (id + timestamp + dict overhead) = **~18 MB**, trivial in memory; use Redis `SET NX` with a TTL if you run several replicas. Retries arrive within minutes, so an hour is ample, and a longer TTL only adds memory. Pair it with a 5-minute timestamp window so a captured request cannot be replayed later.
+
+**2. Paging a Jira project.** 12,500 issues, `maxResults=100`, and you self-limit to 5 requests/s. How long does a full read take, and what do you do on a 429? *Answer:* 125 requests / 5 per second = **25 s** minimum. On a 429, sleep for the `Retry-After` value (not your own guess), then continue from the same `startAt`; add jitter and a hard page cap so a bad `total` cannot loop forever.
+
+**3. Text-to-SQL success math.** First-try success is 70%, and each repair fixes half of the remaining failures. A reviewed template covers 60% of the questions that still fail. What are the outcomes and the average model calls? *Answer:* failures after two repairs = 0.30 x 0.5 x 0.5 = 7.5%, so **92.5% answered by the model**; templates rescue 0.075 x 0.6 = 4.5%; **3.0% refused**. Average calls = 1 + 0.30 + 0.15 = **1.45**. Track repair rate and refusal rate: a rising repair rate usually means schema drift or missing column descriptions.
+
+**4. XML bomb arithmetic.** Ten nested entities each referencing the previous one ten times: how large is the expansion and what is the cheapest defense? *Answer:* 10^9 repetitions of a 3-byte string = **~3 GB** from a file of a few hundred bytes. Cheapest defense: reject any DOCTYPE or ENTITY before parsing (SOAP never needs one), plus a size cap (1 MB) and element and depth caps; use `defusedxml` as a second layer.
+
+**5. Schema context budget.** 40 tables x 12 columns x ~8 tokens is ~3,800 tokens before descriptions. Your budget is 1,500. What do you cut, in order? *Answer:* drop sample values first, then column descriptions, then rank tables by keyword overlap with the question and keep the best until the budget is full. Never cut the foreign keys of kept tables (joins need them) and never include hidden PII columns to make room look better.
